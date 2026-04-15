@@ -109,3 +109,4 @@ jobs:
       - name: Show Azure outputs
         working-directory: environments/azure-dev
         run: terraform output
+        
