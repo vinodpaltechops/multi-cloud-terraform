@@ -4,9 +4,9 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'environments/**'
-      - 'modules/**'
+    # paths:
+    #   - 'environments/**'
+    #   - 'modules/**'
 
 env:
   VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
@@ -109,4 +109,3 @@ jobs:
       - name: Show Azure outputs
         working-directory: environments/azure-dev
         run: terraform output
-        
