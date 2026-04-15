@@ -48,11 +48,11 @@ jobs:
           cli_config_credentials_token: ${{ steps.vault.outputs.TFE_TOKEN }}
 
       - name: Terraform Init — AWS
-        working-directory: environments/aws-dev
+        working-directory: ../../environments/aws-dev
         run: terraform init
 
       - name: Terraform Validate — AWS
-        working-directory: environments/aws-dev
+        working-directory: ../../environments/aws-dev
         run: terraform validate
 
       - name: Terraform Plan — AWS
