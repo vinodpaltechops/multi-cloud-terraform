@@ -1,0 +1,114 @@
+name: Terraform Destroy
+
+on:
+  workflow_dispatch:           # manual trigger only
+    inputs:
+      environment:
+        description: 'Which environment to destroy'
+        required: true
+        type: choice
+        options:
+          - aws-dev
+          - azure-dev
+          - both
+      confirm:
+        description: 'Type DESTROY to confirm'
+        required: true
+
+env:
+  VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
+  VAULT_ROLE: ${{ secrets.VAULT_ROLE }}
+  TF_VERSION: "1.7.0"
+
+jobs:
+  validate-confirmation:
+    name: Validate confirmation
+    runs-on: arc-runner-set
+    steps:
+      - name: Check confirmation input
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "DESTROY" ]; then
+            echo "Confirmation failed — you must type DESTROY exactly"
+            exit 1
+          fi
+          echo "Confirmation accepted — proceeding with destroy"
+
+  destroy-aws:
+    name: Destroy AWS
+    runs-on: arc-runner-set
+    environment: production
+    needs: validate-confirmation
+    if: |
+      github.event.inputs.environment == 'aws-dev' ||
+      github.event.inputs.environment == 'both'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Vault
+        id: vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_ADDR }}
+          method: kubernetes
+          role: ${{ env.VAULT_ROLE }}
+          secrets: |
+            secret/data/ci/tfe token | TFE_TOKEN
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          cli_config_credentials_token: ${{ steps.vault.outputs.TFE_TOKEN }}
+
+      - name: Terraform Init — AWS
+        working-directory: environments/aws-dev
+        run: terraform init
+
+      - name: Terraform Destroy — AWS
+        working-directory: environments/aws-dev
+        run: |
+          terraform destroy \
+            -auto-approve \
+            -no-color \
+            -input=false
+
+  destroy-azure:
+    name: Destroy Azure
+    runs-on: arc-runner-set
+    environment: production
+    needs: validate-confirmation
+    if: |
+      github.event.inputs.environment == 'azure-dev' ||
+      github.event.inputs.environment == 'both'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Vault
+        id: vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_ADDR }}
+          method: kubernetes
+          role: ${{ env.VAULT_ROLE }}
+          secrets: |
+            secret/data/ci/tfe token | TFE_TOKEN
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          cli_config_credentials_token: ${{ steps.vault.outputs.TFE_TOKEN }}
+
+      - name: Terraform Init — Azure
+        working-directory: environments/azure-dev
+        run: terraform init
+
+      - name: Terraform Destroy — Azure
+        working-directory: environments/azure-dev
+        run: |
+          terraform destroy \
+            -auto-approve \
+            -no-color \
+            -input=false

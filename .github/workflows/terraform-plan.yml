@@ -1,0 +1,160 @@
+name: Terraform Plan
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'environments/**'
+      - 'modules/**'
+
+env:
+  VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
+  VAULT_ROLE: ${{ secrets.VAULT_ROLE }}
+  TFE_ORGANIZATION: ${{ secrets.TFE_ORGANIZATION }}
+  TF_VERSION: "1.7.0"
+
+jobs:
+  # ─────────────────────────────────────────
+  # Plan AWS infrastructure
+  # ─────────────────────────────────────────
+  plan-aws:
+    name: Plan AWS
+    runs-on: arc-runner-set
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Vault
+        id: vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_ADDR }}
+          method: kubernetes
+          role: ${{ env.VAULT_ROLE }}
+          secrets: |
+            secret/data/ci/tfe token | TFE_TOKEN
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          cli_config_credentials_token: ${{ steps.vault.outputs.TFE_TOKEN }}
+
+      - name: Terraform Init — AWS
+        working-directory: environments/aws-dev
+        run: terraform init
+
+      - name: Terraform Validate — AWS
+        working-directory: environments/aws-dev
+        run: terraform validate
+
+      - name: Terraform Plan — AWS
+        id: plan-aws
+        working-directory: environments/aws-dev
+        run: |
+          terraform plan \
+            -no-color \
+            -input=false \
+            2>&1 | tee /tmp/aws-plan.txt
+          echo "exitcode=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Post AWS plan comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('/tmp/aws-plan.txt', 'utf8');
+            const maxLength = 65000;
+            const truncated = plan.length > maxLength
+              ? plan.substring(0, maxLength) + '\n... truncated'
+              : plan;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🔍 Terraform Plan — AWS Dev\n\`\`\`hcl\n${truncated}\n\`\`\``
+            });
+
+      - name: Fail if plan failed
+        if: steps.plan-aws.outputs.exitcode == '1'
+        run: exit 1
+
+  # ─────────────────────────────────────────
+  # Plan Azure infrastructure
+  # ─────────────────────────────────────────
+  plan-azure:
+    name: Plan Azure
+    runs-on: arc-runner-set
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Vault
+        id: vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_ADDR }}
+          method: kubernetes
+          role: ${{ env.VAULT_ROLE }}
+          secrets: |
+            secret/data/ci/tfe token | TFE_TOKEN
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          cli_config_credentials_token: ${{ steps.vault.outputs.TFE_TOKEN }}
+
+      - name: Terraform Init — Azure
+        working-directory: environments/azure-dev
+        run: terraform init
+
+      - name: Terraform Validate — Azure
+        working-directory: environments/azure-dev
+        run: terraform validate
+
+      - name: Terraform Plan — Azure
+        id: plan-azure
+        working-directory: environments/azure-dev
+        run: |
+          terraform plan \
+            -no-color \
+            -input=false \
+            2>&1 | tee /tmp/azure-plan.txt
+          echo "exitcode=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Post Azure plan comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('/tmp/azure-plan.txt', 'utf8');
+            const maxLength = 65000;
+            const truncated = plan.length > maxLength
+              ? plan.substring(0, maxLength) + '\n... truncated'
+              : plan;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🔍 Terraform Plan — Azure Dev\n\`\`\`hcl\n${truncated}\n\`\`\``
+            });
+
+      - name: Fail if plan failed
+        if: steps.plan-azure.outputs.exitcode == '1'
+        run: exit 1

@@ -1,0 +1,111 @@
+name: Terraform Apply
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'environments/**'
+      - 'modules/**'
+
+env:
+  VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
+  VAULT_ROLE: ${{ secrets.VAULT_ROLE }}
+  TFE_ORGANIZATION: ${{ secrets.TFE_ORGANIZATION }}
+  TF_VERSION: "1.7.0"
+
+jobs:
+  # ─────────────────────────────────────────
+  # Apply AWS infrastructure
+  # ─────────────────────────────────────────
+  apply-aws:
+    name: Apply AWS
+    runs-on: arc-runner-set
+    environment: production        # requires manual approval in GitHub
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Vault
+        id: vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_ADDR }}
+          method: kubernetes
+          role: ${{ env.VAULT_ROLE }}
+          secrets: |
+            secret/data/ci/tfe token | TFE_TOKEN
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          cli_config_credentials_token: ${{ steps.vault.outputs.TFE_TOKEN }}
+
+      - name: Terraform Init — AWS
+        working-directory: environments/aws-dev
+        run: terraform init
+
+      - name: Terraform Apply — AWS
+        working-directory: environments/aws-dev
+        run: |
+          terraform apply \
+            -auto-approve \
+            -no-color \
+            -input=false
+
+      - name: Show AWS outputs
+        working-directory: environments/aws-dev
+        run: terraform output
+
+  # ─────────────────────────────────────────
+  # Apply Azure infrastructure
+  # ─────────────────────────────────────────
+  apply-azure:
+    name: Apply Azure
+    runs-on: arc-runner-set
+    environment: production        # requires manual approval in GitHub
+    needs: apply-aws               # runs after AWS succeeds
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Vault
+        id: vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_ADDR }}
+          method: kubernetes
+          role: ${{ env.VAULT_ROLE }}
+          secrets: |
+            secret/data/ci/tfe token | TFE_TOKEN
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          cli_config_credentials_token: ${{ steps.vault.outputs.TFE_TOKEN }}
+
+      - name: Terraform Init — Azure
+        working-directory: environments/azure-dev
+        run: terraform init
+
+      - name: Terraform Apply — Azure
+        working-directory: environments/azure-dev
+        run: |
+          terraform apply \
+            -auto-approve \
+            -no-color \
+            -input=false
+
+      - name: Show Azure outputs
+        working-directory: environments/azure-dev
+        run: terraform output

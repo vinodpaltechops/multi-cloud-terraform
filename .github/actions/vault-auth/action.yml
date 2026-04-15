@@ -1,0 +1,22 @@
+name: Authenticate to Vault
+description: Authenticates runner pod to Vault using K8s service account
+
+outputs:
+  tfe_token:
+    description: HCP Terraform API token
+    value: ${{ steps.vault-secrets.outputs.tfe_token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Import Vault secrets
+      id: vault-secrets
+      uses: hashicorp/vault-action@v3
+      with:
+        url: ${{ env.VAULT_ADDR }}
+        method: kubernetes
+        role: ${{ env.VAULT_ROLE }}
+        secrets: |
+          secret/data/ci/tfe token | tfe_token ;
+          secret/data/ci/tfe organization | tfe_organization ;
+          secret/data/ci/tfe address | tfe_address
