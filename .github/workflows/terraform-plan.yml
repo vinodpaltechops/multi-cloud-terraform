@@ -7,30 +7,54 @@ on:
     # paths:
     #   - 'environments/**'
     #   - 'modules/**'
- 
+
 env:
   VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
   VAULT_ROLE: ${{ secrets.VAULT_ROLE }}
-  TFE_ORGANIZATION: ${{ secrets.TFE_ORGANIZATION }}
   TF_VERSION: "1.7.0"
 
+
 jobs:
-  # ─────────────────────────────────────────
-  # Plan AWS infrastructure
-  # ─────────────────────────────────────────
   plan-aws:
     name: Plan AWS
     runs-on: arc-runner-set
-    environment: dev
     permissions:
       contents: read
       id-token: write
       pull-requests: write
 
     steps:
+      # ── Step 1: checkout ──────────────────────────────────
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Validate checkout
+        run: |
+          echo "=== Repo contents ==="
+          ls -la
+          echo "=== AWS env dir ==="
+          ls -la environments/aws-dev/
+          if [ ! -f environments/aws-dev/main.tf ]; then
+            echo "ERROR: main.tf not found"
+            exit 1
+          fi
+          echo "Checkout OK"
+
+      # ── Step 2: tool verification ──────────────────────────
+      - name: Verify required tools
+        run: |
+          echo "=== Checking Node.js ==="
+          node --version || { echo "ERROR: node not found"; exit 1; }
+
+          echo "=== Checking Terraform ==="
+          terraform version || { echo "ERROR: terraform not found"; exit 1; }
+
+          echo "=== Checking curl ==="
+          curl --version || { echo "ERROR: curl not found"; exit 1; }
+
+          echo "All tools verified OK"
+
+      # ── Step 3: vault auth ─────────────────────────────────
       - name: Authenticate to Vault
         id: vault
         uses: hashicorp/vault-action@v3
@@ -41,59 +65,132 @@ jobs:
           secrets: |
             secret/data/ci/tfe token | TFE_TOKEN
 
+      - name: Validate Vault auth
+        run: |
+          if [ -z "${{ steps.vault.outputs.TFE_TOKEN }}" ]; then
+            echo "ERROR: TFE_TOKEN is empty — Vault auth failed"
+            exit 1
+          fi
+          echo "Vault auth OK — TFE token received"
+
+      # ── Step 4: setup terraform ────────────────────────────
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
           cli_config_credentials_token: ${{ steps.vault.outputs.TFE_TOKEN }}
 
+      - name: Validate Terraform setup
+        run: |
+          echo "=== Terraform version ==="
+          terraform version
+
+          echo "=== Terraform credentials file ==="
+          if [ -f ~/.terraformrc ]; then
+            echo "terraformrc exists OK"
+            # Show file exists but NOT the token value
+            grep -q "app.terraform.io" ~/.terraformrc \
+              && echo "HCP Terraform credentials configured OK" \
+              || echo "WARNING: HCP credentials not found in terraformrc"
+          else
+            echo "ERROR: ~/.terraformrc not created"
+            exit 1
+          fi
+
+      # ── Step 5: terraform init ─────────────────────────────
       - name: Terraform Init — AWS
+        id: init-aws
         working-directory: environments/aws-dev
-        run: terraform init
+        run: |
+          echo "=== Running terraform init ==="
+          terraform init -no-color 2>&1 | tee /tmp/aws-init.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "ERROR: terraform init failed"
+            cat /tmp/aws-init.txt
+            exit $EXIT_CODE
+          fi
+          echo "Terraform init OK"
 
+      - name: Validate init — check workspace connected
+        working-directory: environments/aws-dev
+        run: |
+          echo "=== Terraform workspace ==="
+          terraform workspace show
+          echo "Init validation OK"
+
+      # ── Step 6: terraform validate ────────────────────────
       - name: Terraform Validate — AWS
+        id: validate-aws
         working-directory: environments/aws-dev
-        run: terraform validate
+        run: |
+          echo "=== Running terraform validate ==="
+          terraform validate -no-color 2>&1 | tee /tmp/aws-validate.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "ERROR: terraform validate failed"
+            cat /tmp/aws-validate.txt
+            exit $EXIT_CODE
+          fi
+          echo "Terraform validate OK"
 
+      # ── Step 7: terraform plan ─────────────────────────────
       - name: Terraform Plan — AWS
         id: plan-aws
         working-directory: environments/aws-dev
         run: |
+          echo "=== Running terraform plan ==="
           terraform plan \
             -no-color \
             -input=false \
             2>&1 | tee /tmp/aws-plan.txt
           echo "exitcode=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+          echo "Plan step completed"
         continue-on-error: true
 
+      - name: Validate plan output
+        run: |
+          echo "=== Plan exit code: ${{ steps.plan-aws.outputs.exitcode }} ==="
+          if [ -f /tmp/aws-plan.txt ]; then
+            echo "Plan output file exists"
+            wc -l /tmp/aws-plan.txt
+          else
+            echo "ERROR: plan output file not found"
+            exit 1
+          fi
+
+      # ── Step 8: post PR comment ────────────────────────────
       - name: Post AWS plan comment on PR
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
             const plan = fs.readFileSync('/tmp/aws-plan.txt', 'utf8');
+            const exitCode = '${{ steps.plan-aws.outputs.exitcode }}';
+            const status = exitCode === '0' ? '✅ Success' : '❌ Failed';
             const maxLength = 65000;
             const truncated = plan.length > maxLength
               ? plan.substring(0, maxLength) + '\n... truncated'
               : plan;
-            github.rest.issues.createComment({
+            await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `## 🔍 Terraform Plan — AWS Dev\n\`\`\`hcl\n${truncated}\n\`\`\``
+              body: `## Terraform Plan — AWS Dev ${status}\n\`\`\`\n${truncated}\n\`\`\``
             });
+            console.log('PR comment posted OK');
 
-      - name: Fail if plan failed
+      # ── Step 9: fail job if plan failed ───────────────────
+      - name: Fail if plan errored
         if: steps.plan-aws.outputs.exitcode == '1'
-        run: exit 1
+        run: |
+          echo "Terraform plan failed — see plan output above"
+          exit 1
 
-  # ─────────────────────────────────────────
-  # Plan Azure infrastructure
-  # ─────────────────────────────────────────
+  # ── Azure plan job (same pattern) ─────────────────────────
   plan-azure:
     name: Plan Azure
     runs-on: arc-runner-set
-    environment: dev
     permissions:
       contents: read
       id-token: write
@@ -102,6 +199,21 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Validate checkout
+        run: |
+          ls -la environments/azure-dev/
+          if [ ! -f environments/azure-dev/main.tf ]; then
+            echo "ERROR: azure main.tf not found"
+            exit 1
+          fi
+          echo "Checkout OK"
+
+      - name: Verify required tools
+        run: |
+          node --version || { echo "ERROR: node not found"; exit 1; }
+          terraform version || { echo "ERROR: terraform not found"; exit 1; }
+          echo "All tools OK"
 
       - name: Authenticate to Vault
         id: vault
@@ -112,6 +224,14 @@ jobs:
           role: ${{ env.VAULT_ROLE }}
           secrets: |
             secret/data/ci/tfe token | TFE_TOKEN
+
+      - name: Validate Vault auth
+        run: |
+          if [ -z "${{ steps.vault.outputs.TFE_TOKEN }}" ]; then
+            echo "ERROR: TFE_TOKEN empty"
+            exit 1
+          fi
+          echo "Vault auth OK"
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -121,11 +241,19 @@ jobs:
 
       - name: Terraform Init — Azure
         working-directory: environments/azure-dev
-        run: terraform init
+        run: |
+          terraform init -no-color 2>&1 | tee /tmp/azure-init.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          [ $EXIT_CODE -ne 0 ] && { cat /tmp/azure-init.txt; exit $EXIT_CODE; }
+          echo "Init OK"
 
       - name: Terraform Validate — Azure
         working-directory: environments/azure-dev
-        run: terraform validate
+        run: |
+          terraform validate -no-color 2>&1 | tee /tmp/azure-validate.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          [ $EXIT_CODE -ne 0 ] && { cat /tmp/azure-validate.txt; exit $EXIT_CODE; }
+          echo "Validate OK"
 
       - name: Terraform Plan — Azure
         id: plan-azure
@@ -144,17 +272,21 @@ jobs:
           script: |
             const fs = require('fs');
             const plan = fs.readFileSync('/tmp/azure-plan.txt', 'utf8');
+            const exitCode = '${{ steps.plan-azure.outputs.exitcode }}';
+            const status = exitCode === '0' ? '✅ Success' : '❌ Failed';
             const maxLength = 65000;
             const truncated = plan.length > maxLength
               ? plan.substring(0, maxLength) + '\n... truncated'
               : plan;
-            github.rest.issues.createComment({
+            await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `## 🔍 Terraform Plan — Azure Dev\n\`\`\`hcl\n${truncated}\n\`\`\``
+              body: `## Terraform Plan — Azure Dev ${status}\n\`\`\`\n${truncated}\n\`\`\``
             });
 
-      - name: Fail if plan failed
+      - name: Fail if plan errored
         if: steps.plan-azure.outputs.exitcode == '1'
-        run: exit 1
+        run: |
+          echo "Terraform plan failed"
+          exit 1
